@@ -1,0 +1,37 @@
+e1	You are not Electoral
+e2	Memorizing has not been started yet
+e3	wrong month selection
+e4	wrong day selection
+e5	This day Can not be mint at the moment,please wait until the actuall day.
+e6	This day has already memorized
+e7	Not enough funds to memorize this day
+e8	sorry we have a pending request
+e9	Sorry we have already an active sponsorship
+e10	minimum sponsorship period is 1 month
+e11	This day does not memorized yet
+e12	You don`t have this day
+e13	Voting period is not ending
+e14	Low participants
+e15	You don`t have min balance for withdrawal
+e16	not enough time passed
+e17	there is not enough registers
+e18	access denied
+e19	random number is not valid
+e20	During the airdrop period lottery is not allowed
+e21	You already have been registered for this period
+e22	your memo must be equal as a twitt
+e23	This day does not memorized yet
+e24	You don`t have this day
+e25	all urls must have allowed prefix
+e26	This type of NFT is not transferable
+e27	Batch transfer is not implemented
+e28	Only backward change is allowed
+e29	not enough time passed
+e30	This address has airdrop tickets
+e31	Invalid price step
+e32	Invalid price
+e33 you are elder by now
+e34 invalid action
+e35 ambassador must have set twiiter 
+e36 title must be under 50 characters
+e37 Election is not allowed in invitation period

@@ -1,0 +1,636 @@
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.0;
+
+//Founder : Aliz Nabati
+//aliznm.trade@gmail.com
+
+import "@chainlink/contracts/src/v0.8/interfaces/AggregatorV3Interface.sol";
+import "@chainlink/contracts/src/v0.8/VRFConsumerBase.sol";
+import "@openzeppelin/contracts/token/ERC1155/extensions/ERC1155Pausable.sol";
+import "@openzeppelin/contracts/access/Ownable.sol";
+import "@openzeppelin/contracts/utils/Strings.sol";
+import "./BokkyPooBahsDateTimeLibrary.sol";
+
+contract MemorizeThisDayV2 is ERC1155Pausable, Ownable, VRFConsumerBase {
+
+
+   //Enums
+      enum RandomnessType{
+         none,
+         giftSelector,
+         holderShareSelector
+      }
+   //End of Enums
+
+   //Const
+   uint256 private constant MAX_MINT_PRICE = 100000;
+   uint256 private constant MIN_WITHDRAWAL = 0.01 ether;
+   uint256 private constant DEVELOPER_GIFT_COUNT=20;
+   //MintingShares
+      uint256 public constant SMARTCONTRACT_FEES_MINT_SHARE=1;
+      uint256 public constant HOLDERS_MINT_SHARE=25;
+      uint256 public constant MORALIS_COMMUNITY_MINT_SHARE=10;
+      uint256 public constant PATRICK_COLLINS_MINT_SHARE=10;
+      uint256 public constant FIRST_INFLUENCER_MINT_SHARE=10;
+      uint256 public constant SECOND_INFLUENCER_MINT_SHARE=10;
+      uint256 public constant DEVELOPERS_TEAM_MINT_SHARE=34;
+   //Total 100%
+   //TransferShares
+      uint256 public constant SMART_CONTRACT_FEES_TRANSFER_SHARE=1;
+      uint256 public constant OWNER_TRANSFER_SHARE=80;
+      uint256 public constant HOLDERS_TRANSFER_SHARE=10;
+      uint256 public constant MORALIS_COMMUNITY_TRANSFER_SHARE=1;
+      uint256 public constant PATRICK_COLLINS_TRANSFER_SHARE=1;
+      uint256 public constant FIRST_INFLUENCER_TRANSFER_SHARE=1;
+      uint256 public constant SECOND_INFLUENCER_TRANSFER_SHARE=1;
+      uint256 public constant DEVELOPERS_TEAM_TRANSFER_SHARE=5;
+   //Total 100%
+
+   //Vars
+      AggregatorV3Interface internal _priceFeedAddress;
+      string public _assetName ;
+      uint256 public _mintPriceStep = 0;
+
+      uint256 private _holdersShare = 0;
+      RandomnessType private _randomnessType;
+
+      //This value will increase over time
+      //initialize on constructor
+      uint256 public _mintPrice = 0;
+
+      //this array holds addresses which they want to try our periodic gift program
+      //at the end of each period one luchky winner will choosen based on chainlink randomness
+      address[] public _periodicGiftRegisters;
+
+      //this var holds giftperiods in days
+      //7 means each week we will send 1 gift to a random winner which they register for periodic gift program
+      uint256 public _giftPeriodInDays=7;
+      uint public _lastPeriodWinnerSelectDate;
+      
+      //this var holds start day of minting . 
+      //2010/01/01 send via constructor and the nft`s can be minted from 2010/01/01 to current date
+      //this means that we can mint an nft one each day forever.
+      //by the end of 2030 there is estimately 7300 available.
+      //much lower supply in contrasct of other nft collections.
+      uint public _startDate;
+
+      //this array holds _dayNumber as an array which we can know which days and how many days are minted
+      uint256[] public _mintedDays;
+
+      //Which days are minted and the minter want to sell it at specific price
+      uint256[] public _orderBook;
+
+      //
+      uint256 public _chainlinkFee; 
+
+      //
+      bytes32 _keyHash; 
+
+   //Events
+   event WithdrawalEvent(address indexed _address,uint256 indexed _amount);
+   event RegisterForPeriodiclyGiftEvent(address indexed _address);
+   event PeriodicGiftWinnerSelectedEvent(address indexed _address,uint256 randomness);
+   event RequestedRandomnessEvent(bytes32 requestId);
+   event MemorizedEvent(uint256 year, uint256 month, uint256 day,address indexed holder);
+   event SellOrderEvent(uint256 year, uint256 month, uint256 day,address indexed holder);
+   event BuyOrderEvent(uint256 year, uint256 month, uint256 day,address indexed holder);
+   event GiftedEvent(uint256 year, uint256 month, uint256 day,address indexed holder);
+   event SetMemoEvent(address indexed holder, string memo);
+
+
+   //Addresses
+      address public _moralisCommunityAddress;
+      address public _patrickCollinsAddress;
+      address public _firstInfluencerAddress;
+      address public _secondInfluencerAddress;
+      address public _developerTeamShareAddress;
+   //End of Addresses
+
+
+   //Mappings
+      //This mapping works as wallet for holding which addresses can widthdrawal how much .
+      //this mapping will update on different situsations like distribute sharings.
+      mapping(address => uint256) public _wallet;
+
+      //Hold which addresses can min how many days mint as gift without paying mintPrice
+      mapping(address => uint256) public _gifts;
+
+      //with this mapping we can access to holder of day based on _dayNumber
+      mapping(uint256 => address) public _holders;
+
+      //_dayNumber => price
+      mapping(uint256 => uint256) public _orderBookDetails;
+
+      //_dayNumber => holder memo
+      mapping(uint256 => string) public _memo;
+   //End of Mappings
+
+   //Errors
+      //error WrongDaySelection(uint256,uint256);
+   //End of Errors
+
+
+   constructor(string memory assetName , string memory baseURI,uint256 mintPriceStep,  address vrfCoordinator, address linkToken, uint256 chainlinkFee, bytes32 keyHash,address priceFeedAddress,address developersAddress) public VRFConsumerBase(vrfCoordinator,linkToken) ERC1155(baseURI) {
+      _mintPriceStep=mintPriceStep;
+      _mintPrice=mintPriceStep;
+      _developerTeamShareAddress=developersAddress;
+      _gifts[_developerTeamShareAddress]=DEVELOPER_GIFT_COUNT;
+      _chainlinkFee=chainlinkFee;
+      _keyHash=keyHash;
+      _lastPeriodWinnerSelectDate=block.timestamp;
+      _assetName=assetName;
+      
+
+      //we weill intialize some fake address and reserve the share for them until they told us their addresses
+      //with update address for these , we will transfer wallet balance from these addresses to new ones
+      _moralisCommunityAddress=address(1);
+      _patrickCollinsAddress= address(2);
+      _firstInfluencerAddress= address(3);
+      _secondInfluencerAddress= address(4);
+      
+      _priceFeedAddress=AggregatorV3Interface(priceFeedAddress);
+   }
+
+   function GetMintFee() public view returns (uint256) {
+        (, int256 price, , , ) = _priceFeedAddress.latestRoundData();
+        uint256 adjustedPrice = uint256(price) * 10**10; // 18 decimals
+
+        return (_mintPrice * 10**18) / adjustedPrice;
+    }
+
+   //Implement minting function alias as MemorizeThisDay
+   //if some address has gift ticket they can call this function without sending mintPrice
+   //shares are not calculated when some one mint a day by gift ticket
+   // at the end of minting process we will adjust minting price 
+   //minting price will double after each 365 tokens(days)
+   //this mean we weill have double in minting price each year
+   function Memorize(uint year, uint month, uint day) public whenNotPaused payable {
+      require(!(month <= 0 || month >12 ),"wrong month selection");
+      require(!(day <= 0 || day >31 ),"wrong day selection");
+      if((month==4 || month==6 || month==9 || month==11) && day>30){
+          //revert WrongDaySelection(month,day);
+      }
+      
+      if(month==2 && BokkyPooBahsDateTimeLibrary._isLeapYear(year) && day>29)
+      {
+          //revert WrongDaySelection(month,day);
+      }
+      if(month==2 && !BokkyPooBahsDateTimeLibrary._isLeapYear(year) && day>28)
+      {
+          //revert WrongDaySelection(month,day);
+      }
+      
+      uint _dayNumber= BokkyPooBahsDateTimeLibrary.timestampFromDate(year,month,day);
+
+      require(IsDayNumberValidForMinting(_dayNumber),"This day Can not be mint at the moment,please wait until the actuall day.");
+      require(_holders[_dayNumber]==address(0),"This day has already memorized");
+
+
+      bool useGift=false;
+      if(_gifts[msg.sender]>0)
+      {
+         useGift=true;
+         _gifts[msg.sender]=_gifts[msg.sender]-1;
+      }
+
+      if(!useGift)
+      {
+         require(msg.value>= GetMintFee() ,"Not enough funds to memorize this day");
+         uint256 smartContractFeesShare=msg.value*SMARTCONTRACT_FEES_MINT_SHARE/100;
+         _wallet[address(this)]=_wallet[address(this)]+smartContractFeesShare;
+
+         _holdersShare=msg.value*HOLDERS_MINT_SHARE/100;
+
+         uint256 moralisCommunityShare=msg.value*MORALIS_COMMUNITY_MINT_SHARE/100;
+         _wallet[_moralisCommunityAddress]=_wallet[_moralisCommunityAddress]+moralisCommunityShare;
+
+         uint256 patrickCollinsShare=msg.value*PATRICK_COLLINS_MINT_SHARE/100;
+         _wallet[_patrickCollinsAddress]=_wallet[_patrickCollinsAddress]+patrickCollinsShare;
+
+         uint256 firstInfluencerShare=msg.value*FIRST_INFLUENCER_MINT_SHARE/100;
+         _wallet[_firstInfluencerAddress]=_wallet[_firstInfluencerAddress]+firstInfluencerShare;
+
+         uint256 secondInfluencerShare=msg.value*SECOND_INFLUENCER_MINT_SHARE/100;
+         _wallet[_secondInfluencerAddress]=_wallet[_secondInfluencerAddress]+secondInfluencerShare;
+
+         uint256 developerTeamShare=msg.value*DEVELOPERS_TEAM_MINT_SHARE/100;
+         _wallet[_developerTeamShareAddress]=_wallet[_developerTeamShareAddress]+developerTeamShare;
+
+         _randomnessType=RandomnessType.holderShareSelector;
+      }
+   
+      _mint(msg.sender, _dayNumber, 1, "");
+      _mintedDays.push(_dayNumber);
+      _holders[_dayNumber]=msg.sender;
+      AdjustMintingPrice();
+      AdjustGiftPeriod();
+      if(useGift){
+         emit GiftedEvent(year,month,day,msg.sender);
+      }
+      else{
+         emit MemorizedEvent(year,month,day,msg.sender);
+      }
+      
+   }
+
+   //with this function share and earning which are calculated on each mint or transfer can Withdrawal
+   function Withdrawal() public whenNotPaused {
+      require(_wallet[msg.sender]>=MIN_WITHDRAWAL,"You don`t have min balance for withdrawal");
+      uint256 amoutToTransfer=_wallet[msg.sender];
+      _wallet[msg.sender]=0;
+      emit WithdrawalEvent(msg.sender, amoutToTransfer);
+      payable(msg.sender).transfer(amoutToTransfer);
+   }
+
+   //with this function holder of a day can put him/her nft for selling at 
+   //our local market at the desired price in ether
+   function PlaceSellOrder(uint year, uint month, uint day,uint256 price) public whenNotPaused {
+      uint _dayNumber= BokkyPooBahsDateTimeLibrary.timestampFromDate(year,month,day);
+      require(_holders[_dayNumber]==msg.sender,"You don`t have this day");
+      require(_orderBookDetails[_dayNumber]==0,"This day is already in orderBook");
+      _orderBook.push(_dayNumber);
+      _orderBookDetails[_dayNumber]=price;
+      emit SellOrderEvent(year,month,day,msg.sender);
+   }
+
+   //with this function holder of an nft can cancle him/her sell nft order from the orderbook
+   //if anyone put him/her nft to local market place it cannot transfer via safeTransferFrom 
+   //and must be cancle from here first
+   function CancelOrder(uint year, uint month, uint day) public whenNotPaused {
+      uint _dayNumber= BokkyPooBahsDateTimeLibrary.timestampFromDate(year,month,day);
+      require(_holders[_dayNumber]==msg.sender,"You don`t have this day");
+      require(_orderBookDetails[_dayNumber]!=0,"This day is not exist on orderBook");
+      _orderBookDetails[_dayNumber]=0;
+      _removeFromOrderBook(_dayNumber);
+   }
+
+   //with this function you can choose an aleardy minted nft 
+   //which orginal minter has buy it earlier and want to sell it now at an specific price
+   function BuyTheDay(uint year, uint month, uint day) public whenNotPaused payable {
+      uint _dayNumber= BokkyPooBahsDateTimeLibrary.timestampFromDate(year,month,day);
+      require(_orderBookDetails[_dayNumber]!=0,"This day is not exist on orderBook");
+      require(_holders[_dayNumber]!=msg.sender,"You are the owner of this day");
+      require(msg.value>=_orderBookDetails[_dayNumber],"Not enough funds to buy this day");
+
+      uint256 smartContractFeesShare=msg.value*SMART_CONTRACT_FEES_TRANSFER_SHARE/100;
+      _wallet[address(this)]=_wallet[address(this)]+smartContractFeesShare;
+
+      uint256 ownerShare=msg.value*OWNER_TRANSFER_SHARE/100;
+      _wallet[_holders[_dayNumber]]=_wallet[_holders[_dayNumber]]+ownerShare;
+
+      _holdersShare = msg.value*HOLDERS_TRANSFER_SHARE/100;
+
+      uint256 moralisCommunityShare=msg.value*MORALIS_COMMUNITY_TRANSFER_SHARE/100;
+       _wallet[_moralisCommunityAddress]=_wallet[_moralisCommunityAddress]+moralisCommunityShare;
+
+      uint256 patrickCollinsShare=msg.value*PATRICK_COLLINS_TRANSFER_SHARE/100;
+       _wallet[_patrickCollinsAddress]=_wallet[_patrickCollinsAddress]+patrickCollinsShare;
+
+      uint256 firstInfluencerShare=msg.value*FIRST_INFLUENCER_TRANSFER_SHARE/100;
+       _wallet[_firstInfluencerAddress]=_wallet[_firstInfluencerAddress]+firstInfluencerShare;
+
+      uint256 secondInfluencerShare=msg.value*SECOND_INFLUENCER_TRANSFER_SHARE/100;
+       _wallet[_secondInfluencerAddress]=_wallet[_secondInfluencerAddress]+secondInfluencerShare;
+
+      uint256 developerTeamShare=msg.value*DEVELOPERS_TEAM_TRANSFER_SHARE/100;
+       _wallet[_developerTeamShareAddress]=_wallet[_developerTeamShareAddress]+developerTeamShare;
+
+      _randomnessType=RandomnessType.holderShareSelector;
+
+      _safeTransferFrom(_holders[_dayNumber],msg.sender,_dayNumber,1,"");
+      _holders[_dayNumber]=msg.sender;
+      _orderBookDetails[_dayNumber]=0;
+      _removeFromOrderBook(_dayNumber);
+      emit BuyOrderEvent(year,month,day,msg.sender);
+       
+   }
+
+   //this function will adjust minting price and call after each mint
+   function AdjustMintingPrice() private {
+      if(_mintPrice < MAX_MINT_PRICE){
+
+         if(_mintedDays.length % 1460 == 0){
+            _mintPriceStep = _mintPriceStep * 2;
+         }
+
+         if(_mintedDays.length % 365 == 0){
+            _mintPrice = _mintPrice + _mintPriceStep;
+         }
+
+         if(_mintPrice>MAX_MINT_PRICE){
+            _mintPrice=MAX_MINT_PRICE;
+         }
+      }
+
+   }
+
+
+   //any one can call this function to strat the lottery
+   function SelectPeriodicWinner() public whenNotPaused {
+      require(BokkyPooBahsDateTimeLibrary.diffDays(_lastPeriodWinnerSelectDate, block.timestamp)>=_giftPeriodInDays,"not enough time passed");
+      require(_periodicGiftRegisters.length>0,"there is not any registers");
+      bytes32 requestId = requestRandomness(_keyHash,_chainlinkFee);
+      _randomnessType=RandomnessType.giftSelector;
+      emit RequestedRandomnessEvent(requestId);
+   }
+
+   function fulfillRandomness(bytes32 _requestId, uint256 _randomness) internal override { 
+      require(_randomness>0,"random number is not valid");
+      if(_randomnessType==RandomnessType.giftSelector){
+         _randomnessType=RandomnessType.none;
+         require(BokkyPooBahsDateTimeLibrary.diffDays(_lastPeriodWinnerSelectDate, block.timestamp)>=_giftPeriodInDays,"not enough time passed");
+         _lastPeriodWinnerSelectDate=block.timestamp;
+         uint256 indexOfWinner=_randomness % _periodicGiftRegisters.length;
+         _gifts[_periodicGiftRegisters[indexOfWinner]]=_gifts[_periodicGiftRegisters[indexOfWinner]]+1;
+         emit PeriodicGiftWinnerSelectedEvent(_periodicGiftRegisters[indexOfWinner], _randomness);
+         _periodicGiftRegisters=new address[](0);
+      }
+      else if(_randomnessType==RandomnessType.holderShareSelector){
+         if(_mintedDays.length<5){
+            _wallet[_developerTeamShareAddress]=_wallet[_developerTeamShareAddress]+_holdersShare;
+         }
+         else if(_mintedDays.length==5){
+            uint256 eachShare=_holdersShare/5;
+            _wallet[_holders[_mintedDays[0]]]=_wallet[_holders[_mintedDays[0]]]+eachShare;
+            _wallet[_holders[_mintedDays[1]]]=_wallet[_holders[_mintedDays[0]]]+eachShare;
+            _wallet[_holders[_mintedDays[2]]]=_wallet[_holders[_mintedDays[0]]]+eachShare;
+            _wallet[_holders[_mintedDays[3]]]=_wallet[_holders[_mintedDays[0]]]+eachShare;
+            _wallet[_holders[_mintedDays[4]]]=_wallet[_holders[_mintedDays[0]]]+eachShare;
+         }
+         else{
+            uint256 eachShare=_holdersShare/5;
+            uint256 index=_randomness % _mintedDays.length;
+            uint256 numOfHolders=5;
+            while(numOfHolders!=0)
+            {
+               if(index>=_mintedDays.length){
+                  index=0;
+               }
+               _wallet[_holders[_mintedDays[index]]]=_wallet[_holders[_mintedDays[index]]]+eachShare;
+               index=index+1;
+               numOfHolders=numOfHolders-1;
+            }
+         }
+         _randomnessType=RandomnessType.none;
+         //TODO
+      }
+   
+      
+   }
+
+   //this function will adjust each periodic gift period
+   //this period will be once a week until first 1000 mints and 30 after that
+   function AdjustGiftPeriod() private{
+      if(_mintedDays.length>=1000)
+      {
+         _giftPeriodInDays=30;
+      }
+   }
+
+   //with this function each address can register for luckyPeriodicGift
+   //just once per period
+   function RegisterForPeriodiclyGift() public whenNotPaused {
+      bool isPermitted=true;
+      for(uint i=0;i<_periodicGiftRegisters.length;i++)
+      {
+         if(_periodicGiftRegisters[i]==msg.sender)
+         {
+            isPermitted=false;
+         }
+      }
+      require(isPermitted,"You already have been registered for this week");
+      _periodicGiftRegisters.push(msg.sender);
+      emit RegisterForPeriodiclyGiftEvent(msg.sender);
+   }
+
+   //this function returns address of specific nft holder by _dayNumber
+   function GetHolderOfTheDay(uint year, uint month, uint day) public view returns(address){
+      uint _dayNumber= BokkyPooBahsDateTimeLibrary.timestampFromDate(year,month,day);
+      return _holders[_dayNumber];
+   }
+
+   //This functions returns _periodicGiftRegisters.length
+   function GetPeriodicGiftRegistersLength() public view returns(uint256){
+      return _periodicGiftRegisters.length;
+   }
+
+   //This functions returns _mintedDays.length
+   function GetMintedDaysLength() public view returns(uint256){
+      return _mintedDays.length;
+   }
+
+   //this function returns _orderBook.length
+   function GetOrderBookLength() public view returns(uint256){
+      return _orderBook.length;
+   }
+   
+
+   //get day search term
+   function GetSearchTerm(uint year, uint month, uint day) public view returns(string[3] memory){
+      uint _dayNumber= BokkyPooBahsDateTimeLibrary.timestampFromDate(year,month,day);
+      require(_holders[_dayNumber]!=address(0),"This day does not memorized yet");
+
+      string[3] memory res=["", "" , ""];
+
+      res[0]=Strings.toString(year);
+      res[1]=_assetName;
+
+      bytes memory tempEmptyStringTest = bytes(_memo[_dayNumber]); // Uses memory
+      if (tempEmptyStringTest.length != 0) {
+         res[2]=(_memo[_dayNumber]);
+      }    
+
+      return res;
+   }
+
+   function SetMemo(uint year, uint month, uint day,string memory memo) public whenNotPaused {
+      uint _dayNumber= BokkyPooBahsDateTimeLibrary.timestampFromDate(year,month,day);
+      require(_holders[_dayNumber]!=address(0),"This day does not memorized yet");
+      require(_holders[_dayNumber]==msg.sender,"You don`t have this day");
+      _memo[_dayNumber]=memo;
+      emit SetMemoEvent(msg.sender, memo);
+   }
+
+//Overrides
+   //this overriding is for checking if an nft is in local orderbook
+   //it cannot be transfers via safeTransferFrom
+   function safeTransferFrom(
+        address from,
+        address to,
+        uint256 id,
+        uint256 amount,
+        bytes memory data
+    ) public override {
+        require(
+            from == _msgSender() || isApprovedForAll(from, _msgSender()),
+            "ERC1155: caller is not owner nor approved"
+        );
+
+        //id is _dayNumber;
+        require(_orderBookDetails[id]==0,"This item is in local orderBook.please first cancle the order."); 
+         _safeTransferFrom(from, to, id, amount, data);
+         _holders[id]=msg.sender;
+
+    }
+
+    function safeBatchTransferFrom(
+        address from,
+        address to,
+        uint256[] memory ids,
+        uint256[] memory amounts,
+        bytes memory data
+    ) public override {
+        require(
+            from == _msgSender() || isApprovedForAll(from, _msgSender()),
+            "ERC1155: transfer caller is not owner nor approved"
+        );
+        require(false,"Batch transfer is not implemented");
+        _safeBatchTransferFrom(from, to, ids, amounts, data);
+    }
+//End of Overrides
+
+//Utillity Functions
+   function GetIdByDate(uint year, uint month, uint day) public view returns(uint){
+      return BokkyPooBahsDateTimeLibrary.timestampFromDate(year,month,day);
+   }
+   function IsDayNumberValidForMinting(uint _dayNumber) public view returns(bool){
+      //using block.timestamp is secure for this purpose
+      if(_dayNumber<=block.timestamp && _dayNumber>=_startDate)
+         return true;
+      else
+         return false;
+   }
+
+   function _removeFromOrderBook(uint _dayNumber) private {
+      if(_orderBook.length==0){
+         //Do nothing
+      }
+      else if(_orderBook.length==1){
+          _orderBook.pop();
+      }
+      else{
+         uint index=0;
+         bool indexFound=false;
+         for (uint i = 0; i<_orderBook.length-1; i++){
+            if(_orderBook[i]==_dayNumber)
+            {
+               index=i;
+               indexFound=true;
+               break;
+            }
+         }
+         if (!indexFound) return;
+         //uint256 element = _orderBook[index];
+         _orderBook[index] = _orderBook[_orderBook.length - 1];
+         _orderBook.pop();
+      }
+      
+    }
+//End of Utilitty Functions
+
+//Administration Parts
+   function SetMoralisTeamAddress(address addrs,bool preserveBalance) public onlyOwner{
+      if(preserveBalance){
+         address oldAddress=_moralisCommunityAddress;
+         _moralisCommunityAddress=addrs;
+         _wallet[_moralisCommunityAddress]=_wallet[oldAddress];
+         _wallet[oldAddress]=0;
+      }
+      else{
+         address oldAddress=_moralisCommunityAddress;
+         _moralisCommunityAddress=addrs;
+         _wallet[_developerTeamShareAddress]=_wallet[_developerTeamShareAddress]+_wallet[oldAddress];
+         _wallet[oldAddress]=0;
+      }
+   }
+
+   function SetPatrickCollinsAddress(address addrs,bool preserveBalance) public onlyOwner{
+      if(preserveBalance){
+         address oldAddress=_patrickCollinsAddress;
+         _patrickCollinsAddress=addrs;
+         _wallet[_patrickCollinsAddress]=_wallet[oldAddress];
+         _wallet[oldAddress]=0;
+      }
+      else{
+         address oldAddress=_patrickCollinsAddress;
+         _patrickCollinsAddress=addrs;
+         _wallet[_developerTeamShareAddress]=_wallet[_developerTeamShareAddress]+_wallet[oldAddress];
+         _wallet[oldAddress]=0;
+      }
+
+   }
+
+   function SetSecondInfluencerAddress(address addrs,bool preserveBalance) public onlyOwner{
+      if(preserveBalance){
+         address oldAddress=_secondInfluencerAddress;
+         _secondInfluencerAddress=addrs;
+         _wallet[_secondInfluencerAddress]=_wallet[oldAddress];
+         _wallet[oldAddress]=0;
+      }
+      else{
+         address oldAddress=_secondInfluencerAddress;
+         _secondInfluencerAddress=addrs;
+         _wallet[_developerTeamShareAddress]=_wallet[_developerTeamShareAddress]+_wallet[oldAddress];
+         _wallet[oldAddress]=0;
+      }
+      
+   }
+
+   function SetFirstInfluencerAddress(address addrs,bool preserveBalance) public onlyOwner{
+      if(preserveBalance){
+         address oldAddress=_firstInfluencerAddress;
+         _firstInfluencerAddress=addrs;
+         _wallet[_firstInfluencerAddress]=_wallet[oldAddress];
+         _wallet[oldAddress]=0;
+      }
+      else{
+         address oldAddress=_firstInfluencerAddress;
+         _firstInfluencerAddress=addrs;
+         _wallet[_developerTeamShareAddress]=_wallet[_developerTeamShareAddress]+_wallet[oldAddress];
+         _wallet[oldAddress]=0;
+      }
+      
+   }
+
+   function SetDeveloperTeamShareAddress(address addrs) public onlyOwner{
+      address oldAddress=_developerTeamShareAddress;
+      _developerTeamShareAddress=addrs;
+      _wallet[_developerTeamShareAddress]=_wallet[oldAddress];
+      _wallet[oldAddress]=0;
+   }
+
+
+   //For Security Concerns
+   //This let developers pause and correct the logic 
+   function PauseContract() public onlyOwner {
+      _pause();
+   }
+
+   //For Security Concerns
+   //This let developers pause and correct the logic 
+   function UnPauseContract() public onlyOwner {
+      _unpause();
+   }
+
+   //This function let developers get the smartcontract fee and pay for infrastructure and ...
+   function WithdrawalSmartContractFee() public onlyOwner whenNotPaused payable{
+      uint256 amount= _wallet[address(this)];
+      _wallet[address(this)]=0;
+      payable(msg.sender).transfer(amount);
+   }
+
+   //for future . if chainlink fee change 
+   function UpdateChainlinkFee(uint256 fee) public onlyOwner whenNotPaused {
+      _chainlinkFee=fee;
+   }
+
+   function ChangeStratDate(uint year, uint month, uint day) public onlyOwner whenNotPaused {
+      uint _dayNumber= BokkyPooBahsDateTimeLibrary.timestampFromDate(year,month,day);
+      if(_startDate!=0){
+         require(_dayNumber < _startDate,"Only backward change is allowed");
+      }
+      _startDate=_dayNumber;
+   }
+   
+//End of Administration Parts
+}
